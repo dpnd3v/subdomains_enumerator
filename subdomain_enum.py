@@ -307,6 +307,7 @@ async def _run_async(
     qps: float,
     timeout: float,
     idle_timeout: float,
+    wildcard_ips: set[str] | None = None,
 ) -> tuple[list[dict], str]:
     loop      = asyncio.get_event_loop()
     bucket    = TokenBucket(rate=qps, capacity=qps * 2)
@@ -337,7 +338,7 @@ async def _run_async(
             except Exception:
                 result = None
             completed += 1
-            if result:
+            if result and result['ip'] not in (wildcard_ips or set()):
                 found.append(result)
                 last_hit = time.monotonic()
                 # Print hit immediately in real time
@@ -373,6 +374,24 @@ async def _run_async(
     return found, stop_reason
 
 
+
+def detect_wildcards(domain: str) -> set[str]:
+    """
+    Resolve 5 random non-existent subdomains.
+    Any IP that appears 2+ times is a wildcard catch-all and will be filtered.
+    """
+    import random, string
+    hits: dict[str, int] = {}
+    for _ in range(5):
+        rand = "".join(random.choices(string.ascii_lowercase, k=14))
+        try:
+            ip = socket.gethostbyname(f"{rand}.{domain}")
+            hits[ip] = hits.get(ip, 0) + 1
+        except Exception:
+            pass
+    return {ip for ip, count in hits.items() if count >= 2}
+
+
 # ─────────────────────────────────────────────
 #  Main enumeration entry point
 # ─────────────────────────────────────────────
@@ -405,12 +424,20 @@ def enumerate_subdomains(
     print(f"[*] Adaptive throttle active — auto-slows on timeout spike")
     if nameservers:
         print(f"[!] Note: --ns flag noted but system DNS is used (asyncio mode)")
+
+    # ── Wildcard detection ──
+    print(f"[*] Wildcard check : ", end="", flush=True)
+    wildcard_ips = detect_wildcards(domain)
+    if wildcard_ips:
+        print(f"DETECTED — filtering IPs: {', '.join(wildcard_ips)}")
+    else:
+        print("none detected.")
     print()
 
     t_start = time.monotonic()
 
     found, stop_reason = asyncio.run(
-        _run_async(domain, words, concurrency, qps, timeout, idle_timeout)
+        _run_async(domain, words, concurrency, qps, timeout, idle_timeout, wildcard_ips)
     )
 
     elapsed = time.monotonic() - t_start
